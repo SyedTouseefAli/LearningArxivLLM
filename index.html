@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ArxivLLM - Research Environment</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;500;600&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .arxiv-serif { font-family: 'Libre Baskerville', serif; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #d6d3d1; border-radius: 4px; }
+        #viewer-container { display: flex; justify-content: center; overflow: auto; background-color: #f5f5f4; height: 100%; padding: 20px; }
+        #pdf-canvas { background: white; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); max-width: 100%; height: auto; }
+        .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 50; }
+        .modal.active { display: flex; align-items: center; justify-content: center; }
+    </style>
+</head>
+<body class="bg-stone-50 text-stone-900 h-screen flex flex-col overflow-hidden">
+
+    <header class="flex items-center justify-between px-6 py-3 border-b border-stone-200 bg-white">
+        <div class="flex items-center gap-2">
+            <span class="arxiv-serif text-2xl font-bold tracking-tight">ArxivLLM</span>
+        </div>
+        <div class="flex items-center gap-3">
+            <div id="connection-status" class="flex items-center gap-2 px-3 py-1 bg-stone-100 rounded-full text-xs font-medium text-stone-600">
+                <span id="status-dot" class="w-2 h-2 rounded-full bg-stone-400"></span>
+                <span id="status-text">Disconnected</span>
+            </div>
+            <select id="model-select" class="px-2 py-1.5 text-sm border border-stone-300 rounded bg-white focus:outline-none">
+                <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+            </select>
+            <input type="password" id="api-key-input" placeholder="Gemini API Key" 
+                   class="px-3 py-1.5 text-sm border border-stone-300 rounded focus:outline-none w-48">
+            <button onclick="connectApi()" class="px-4 py-1.5 text-sm bg-stone-900 text-white rounded hover:bg-stone-700 transition-colors">Connect</button>
+        </div>
+    </header>
+
+    <main class="flex-1 flex overflow-hidden">
+        <aside class="w-64 border-r border-stone-200 bg-white p-4 flex flex-col gap-4">
+            <button onclick="document.getElementById('file-upload').click()" class="w-full py-2 border border-stone-300 text-stone-600 text-sm hover:bg-stone-50 rounded transition-colors">+ Upload Paper</button>
+            <input type="file" id="file-upload" accept="application/pdf" class="hidden" onchange="handleFileUpload(event)">
+            <div id="doc-list" class="flex-1 overflow-y-auto space-y-2"></div>
+            <div id="research-actions" class="hidden space-y-2 pt-4 border-t border-stone-200">
+                <button onclick="generateMindMap()" class="w-full py-2 bg-stone-100 text-stone-700 text-sm rounded hover:bg-stone-200 transition-colors">Generate Mind Map</button>
+                <button onclick="generatePresentation()" class="w-full py-2 bg-stone-100 text-stone-700 text-sm rounded hover:bg-stone-200 transition-colors">Generate Presentation</button>
+            </div>
+        </aside>
+
+        <section class="flex-1 bg-stone-200 overflow-hidden">
+            <div id="viewer-container">
+                <canvas id="pdf-canvas"></canvas>
+            </div>
+        </section>
+
+        <aside class="w-96 border-l border-stone-200 bg-white flex flex-col">
+            <div id="chat-messages" class="flex-1 p-4 overflow-y-auto space-y-4 text-sm"><div class="text-stone-500 italic text-center py-10">Upload a paper to begin research.</div></div>
+            <div class="p-4 border-t border-stone-200 bg-stone-50">
+                <textarea id="chat-input" placeholder="Ask questions about your research..." class="w-full p-3 border border-stone-200 rounded text-sm mb-2 focus:outline-none h-24 bg-white"></textarea>
+                <button onclick="sendMessage()" class="w-full py-2 bg-stone-900 text-white text-sm rounded hover:bg-stone-700 transition-colors">Send Query</button>
+            </div>
+        </aside>
+    </main>
+
+    <div id="mindmap-modal" class="modal"><div class="bg-white p-6 rounded-lg shadow-xl w-[80vw] h-[80vh] flex flex-col"><h2 class="text-xl font-bold mb-4">Mind Map</h2><div id="mindmap-content" class="flex-1 overflow-auto border border-stone-200 bg-stone-50 rounded p-4"></div><button onclick="closeModal('mindmap-modal')" class="mt-4 px-4 py-2 bg-stone-900 text-white rounded">Close</button></div></div>
+
+    <script>
+        let apiKey = '';
+        let currentPdfDoc = null;
+        let pdfTextContent = "";
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        async function connectApi() {
+            apiKey = document.getElementById('api-key-input').value.trim();
+            if (!apiKey) { appendMessage('ai', "Please enter a valid API Key."); return; }
+            document.getElementById('status-dot').className = "w-2 h-2 rounded-full bg-green-500";
+            document.getElementById('status-text').innerText = "Connected";
+            appendMessage('ai', "API Connected. Ready for research.");
+        }
+
+        async function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async function() {
+                const typedarray = new Uint8Array(this.result);
+                currentPdfDoc = await pdfjsLib.getDocument({data: typedarray}).promise;
+                pdfTextContent = "";
+                for (let i = 1; i <= Math.min(currentPdfDoc.numPages, 5); i++) {
+                    const page = await currentPdfDoc.getPage(i);
+                    const text = await page.getTextContent();
+                    pdfTextContent += text.items.map(s => s.str).join(" ");
+                }
+                renderPdf(currentPdfDoc);
+                document.getElementById('doc-list').innerHTML = `<div class="p-2 bg-stone-100 border border-stone-200 rounded text-xs font-medium truncate mb-1">📄 ${file.name}</div>`;
+                document.getElementById('research-actions').classList.remove('hidden');
+                appendMessage('ai', `Loaded "${file.name}".`);
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        async function renderPdf(pdfDoc) {
+            const page = await pdfDoc.getPage(1);
+            const canvas = document.getElementById('pdf-canvas');
+            const context = canvas.getContext('2d');
+            const viewport = page.getViewport({ scale: 1.5 });
+            canvas.height = viewport.height; canvas.width = viewport.width;
+            await page.render({ canvasContext: context, viewport: viewport }).promise;
+        }
+
+        async function callGemini(promptText) {
+            const model = document.getElementById('model-select').value;
+            // Clean URL: ensure we use /v1beta/models/... once.
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+            console.log("Calling API:", url);
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: `System: You are an agentic research assistant. If the question is document-related, answer based on the PDF content and include Section/Page references. If it's a general question, answer as a knowledgeable assistant.\n\nContext: ${pdfTextContent.substring(0, 5000)}\n\nQuery: ${promptText}` }] }]
+                })
+            });
+            const data = await response.json();
+            if (data.error) throw new Error(data.error.message);
+            if (!data.candidates || data.candidates.length === 0) throw new Error("No response candidates.");
+            return data.candidates[0].content.parts[0].text;
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text || !apiKey) return;
+            appendMessage('user', text);
+            input.value = '';
+            try {
+                const response = await callGemini(text);
+                appendMessage('ai', response);
+            } catch (err) {
+                appendMessage('ai', "API Error: " + err.message);
+            }
+        }
+
+        async function generateMindMap() {
+            try {
+                const text = await callGemini("Generate a mind map in valid JSON format only for this document. Keys: title, children: {title, description}. No markdown.");
+                const json = JSON.parse(text.replace(/```json/g,'').replace(/```/g,''));
+                const modal = document.getElementById('mindmap-modal');
+                const content = document.getElementById('mindmap-content');
+                content.innerHTML = `<h3 class="font-bold text-lg">${json.title}</h3>` + json.children.map(c => `<div class="mt-4 p-3 bg-white border border-stone-200 rounded"><h4 class="font-semibold">${c.title}</h4><p class="text-xs text-stone-600">${c.description}</p></div>`).join('');
+                modal.classList.add('active');
+            } catch (err) { appendMessage('ai', "Error generating mind map: " + err.message); }
+        }
+
+        function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+        function appendMessage(sender, text) {
+            const chat = document.getElementById('chat-messages');
+            if (chat.querySelector('.text-center')) chat.innerHTML = '';
+            const div = document.createElement('div');
+            div.className = sender === 'user' ? 'p-3 bg-stone-100 rounded text-stone-800 ml-auto max-w-[90%]' : 'p-3 bg-stone-900 text-stone-100 rounded shadow-sm max-w-[90%]';
+            div.innerText = text;
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+    </script>
+</body>
+</html>
